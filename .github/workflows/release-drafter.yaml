@@ -25,12 +25,16 @@ jobs:
     timeout-minutes: 3
     steps:
       # Load the egress allow-list out-of-band from the
-      # organisation's .github repository and publish it as
-      # $CONNECTION_ALLOW_LIST for the harden-runner step below.
+      # lfreleng-actions/.github repository and publish it as
+      # $CONNECTION_ALLOW_LIST for the harden-runner step below. The
+      # host org and file are named outright: left implicit, both
+      # default to this repository's owner, whose .github repository
+      # holds neither the pinned commit nor a list for it.
       # yamllint disable-line rule:line-length
       - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
         with:
-          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
 
       # Harden the runner with the just-loaded allow-list.
       - name: 'Harden runner (block)'
