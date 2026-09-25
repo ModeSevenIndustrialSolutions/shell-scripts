@@ -494,22 +494,33 @@ $END_MARK
 EOF
 }
 
-# The value the block records for the clone directory, read back out of
-# the first managed block found. Reported by --status, where the variable
-# this process inherited says only what the shell that launched it knew,
-# which right after an install is the previous answer or none at all.
-recorded_fork_path() {
-    awk -v begin="$BEGIN_MARK" -v end="$END_MARK" '
+# A value the block records, read back out of the first managed block
+# found: LFRELENG_ACTIONS_FORK_PATH or LFRELENG_SHELL_SCRIPTS, named by
+# $1. Reported by --status, where the variable this process inherited
+# says only what the shell that launched it knew, which right after an
+# install is the previous answer or none at all.
+recorded_value() {
+    awk -v begin="$BEGIN_MARK" -v end="$END_MARK" -v prefix="$1=\"" '
         $0 == begin { inside = 1; next }
         $0 == end   { inside = 0; next }
-        inside && $0 ~ /^[[:space:]]*LFRELENG_ACTIONS_FORK_PATH="/ {
+        inside {
             line = $0
-            sub(/^[[:space:]]*LFRELENG_ACTIONS_FORK_PATH="/, "", line)
+            sub(/^[[:space:]]*/, "", line)
+            if (index(line, prefix) != 1) next
+            line = substr(line, length(prefix) + 1)
             sub(/"[[:space:]]*$/, "", line)
             print line
             exit
         }
-    ' "$1" 2>/dev/null
+    ' "$2" 2>/dev/null
+}
+
+# Fill in both recorded values for --status from the block in file $1,
+# unless an earlier block already has: the first one found answers.
+read_recorded() {
+    [ -z "$recorded" ] || return 0
+    recorded=$(recorded_value LFRELENG_ACTIONS_FORK_PATH "$1")
+    recorded_clone=$(recorded_value LFRELENG_SHELL_SCRIPTS "$1")
 }
 
 # Replace a file's contents without replacing the file: many people keep
@@ -591,11 +602,12 @@ if [ "$action" = status ]; then
 
     seen=0
     recorded=''
+    recorded_clone=''
     while IFS= read -r file; do
         seen=1
         if has_block "$file"; then
             report installed "$file"
-            [ -n "$recorded" ] || recorded=$(recorded_fork_path "$file")
+            read_recorded "$file"
         elif [ -f "$file" ]; then
             report absent "$file"
         else
@@ -616,10 +628,34 @@ if [ "$action" = status ]; then
     while IFS= read -r file; do
         if has_block "$file" && ! grep -qxF "$file" "$TARGETS"; then
             report stray "$file"
-            [ -n "$recorded" ] || recorded=$(recorded_fork_path "$file")
+            read_recorded "$file"
         fi
     done <"$STRAYS"
     rm -f "$STRAYS"
+
+    # Where new shells load the tools from. The block skips a loader.sh
+    # it cannot read without a word, so a clone that has gone -- moved,
+    # deleted, or cleared out of a temporary directory -- shows up here
+    # or nowhere.
+    say "loads from:"
+    if [ -n "$recorded_clone" ]; then
+        recorded_clone=$(decode_recorded "$recorded_clone")
+        report recorded "$recorded_clone"
+        clone_trouble=0
+        if [ ! -r "$recorded_clone/loader.sh" ]; then
+            report missing 'no loader.sh there, so new shells load no tools'
+            clone_trouble=1
+        fi
+        if in_temporary_dir "$recorded_clone"; then
+            report temporary 'the system deletes files there, at the latest on reboot'
+            clone_trouble=1
+        fi
+        if [ "$clone_trouble" -eq 1 ]; then
+            say "  Re-run install.sh from a clone kept somewhere permanent."
+        fi
+    else
+        report recorded '(no managed block found)'
+    fi
 
     say "fork path:"
     if [ -n "$recorded" ]; then

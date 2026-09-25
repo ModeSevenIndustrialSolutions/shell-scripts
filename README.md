@@ -150,11 +150,18 @@ else.
 ./install.sh --status
 ```
 
-This reports the clone in use, which start-up files carry the block, and
-the clone directory the block records — alongside the value the current
-shell happens to carry, which right after an install is the previous
-answer, or none. A block in a file that the installer would no longer
-choose shows as `stray`.
+This reports the clone you ran it from, which start-up files carry the
+block, the clone the block loads the tools from, and the clone directory
+the block records — alongside the value the current shell happens to
+carry, which right after an install is the previous answer, or none. A
+block in a file that the installer would no longer choose shows as
+`stray`.
+
+The clone the block loads from shows as `missing` when its `loader.sh`
+has gone, and as `temporary` when it sits somewhere the system clears by
+itself. Either way, re-run the installer from a clone kept somewhere
+permanent. The block skips a missing clone without a word, so this is
+the place to look when the tools vanish from new shells.
 
 ### Uninstalling
 

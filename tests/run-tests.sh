@@ -108,6 +108,25 @@ install_into() {
     HOME=$1 "$REPO_DIR/install.sh" --yes --fork-path "$2"
 }
 
+# A copy of the clone's working parts at $1, to install from somewhere
+# other than the clone under test.
+copy_clone() {
+    mkdir -p "$1"
+    cp -pR "$REPO_DIR/install.sh" "$REPO_DIR/loader.sh" "$REPO_DIR/tools" "$1/"
+}
+
+# The system empties these by itself, whatever TMPDIR says. The sandbox
+# normally lives in one of them, which is what lets a copy of the clone
+# stand in for one somebody made under /tmp.
+under_fixed_temp() {
+    _uft=$(CDPATH='' cd -- "$1" && pwd -P)
+    case "$_uft/" in
+        /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*|/dev/shm/*)
+            return 0 ;;
+    esac
+    return 1
+}
+
 SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/lfreleng-tests.XXXXXX")
 printf 'testing %s\n\n' "$REPO_DIR"
 
@@ -388,6 +407,53 @@ case "$got" in
             "expected '$decode_root' in:
 $got" ;;
 esac
+
+# Where the tools load from, which is the clone the block was written
+# from -- not the one --status happens to be run out of.
+got=$(env -i HOME="$home" PATH="$PATH" "$REPO_DIR/install.sh" --status 2>&1)
+case "$got" in
+    *"loads from:"*"recorded"*"$REPO_DIR"*)
+        pass 'status: reports the clone the block loads from' ;;
+    *)  fail 'status: reports the clone the block loads from' "$got" ;;
+esac
+if under_fixed_temp "$REPO_DIR"; then
+    skip 'status: raises no alarm over a clone in place' \
+        'this clone is itself in a temporary directory'
+else
+    case "$got" in
+        *missing*|*temporary*)
+            fail 'status: raises no alarm over a clone in place' "$got" ;;
+        *)  pass 'status: raises no alarm over a clone in place' ;;
+    esac
+fi
+
+# The block skips a loader.sh it cannot read without a word, so --status
+# is the one place a vanished clone shows. A periodic sweep of a
+# temporary directory leaves the directories and takes the files, which
+# is the shape copied here.
+gone_clone="$SANDBOX/gone-clone"
+gone_home=$(new_home gone)
+copy_clone "$gone_clone"
+HOME="$gone_home" "$gone_clone/install.sh" --yes --fork-path "$forks" \
+    >/dev/null 2>&1
+rm -f "$gone_clone/loader.sh"
+got=$(env -i HOME="$gone_home" PATH="$PATH" "$REPO_DIR/install.sh" --status 2>&1)
+case "$got" in
+    *"recorded"*"$gone_clone"*"missing"*)
+        pass 'status: flags a recorded clone whose loader.sh has gone' ;;
+    *)  fail 'status: flags a recorded clone whose loader.sh has gone' "$got" ;;
+esac
+if under_fixed_temp "$gone_clone"; then
+    case "$got" in
+        *temporary*)
+            pass 'status: flags a recorded clone in a temporary directory' ;;
+        *)  fail 'status: flags a recorded clone in a temporary directory' \
+                "$got" ;;
+    esac
+else
+    skip 'status: flags a recorded clone in a temporary directory' \
+        'the sandbox is not under a system temporary directory'
+fi
 
 # --- dry run ---------------------------------------------------------------
 
@@ -723,24 +789,10 @@ fi
 
 # --- a clone in a temporary directory --------------------------------------
 
-# The system empties these by itself, whatever TMPDIR says. The sandbox
-# normally lives in one of them, which is what lets a copy of the clone
-# stand in for one somebody made under /tmp.
-under_fixed_temp() {
-    _uft=$(CDPATH='' cd -- "$1" && pwd -P)
-    case "$_uft/" in
-        /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*|/dev/shm/*)
-            return 0 ;;
-    esac
-    return 1
-}
-
 # The block records the clone's path, so a clone that vanishes takes the
 # tools with it, silently. Installing from one has to say so.
 temp_clone="$SANDBOX/temp-clone"
-mkdir -p "$temp_clone"
-cp -pR "$REPO_DIR/install.sh" "$REPO_DIR/loader.sh" "$REPO_DIR/tools" \
-    "$temp_clone/"
+copy_clone "$temp_clone"
 if under_fixed_temp "$temp_clone"; then
     temp_home=$(new_home temp)
     if HOME="$temp_home" "$temp_clone/install.sh" --yes --fork-path "$forks" \
