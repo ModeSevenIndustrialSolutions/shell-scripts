@@ -131,6 +131,11 @@ under_fixed_temp() {
 }
 
 SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/lfreleng-tests.XXXXXX")
+# macOS sets TMPDIR with a trailing slash, which leaves a '//' in the
+# name mktemp returns. The installer records a clone's path from
+# 'cd && pwd', which folds it away, so a test comparing --status output
+# against a sandbox path would never match. Spell it the same way here.
+SANDBOX=$(CDPATH='' cd -- "$SANDBOX" && pwd)
 printf 'testing %s\n\n' "$REPO_DIR"
 
 # --- static checks ---------------------------------------------------------
