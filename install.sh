@@ -231,6 +231,40 @@ decode_recorded() {
     printf '%s\n' "$_dr_out"
 }
 
+# Succeed when path $1 lies at or below directory $2. Both are compared
+# as given, so resolve symlinks first where that matters.
+path_within() {
+    case "${1%/}/" in
+        "${2%/}/"*) return 0 ;;
+    esac
+    return 1
+}
+
+# Succeed when $1 lies in a directory the system empties by itself: /tmp
+# on every reboot, and on macOS the per-user /var/folders tree too, both
+# of which are also swept between reboots. A clone there disappears from
+# under the managed block, which then skips loader.sh without a word.
+# /var/tmp stays off the list: it survives reboots on Linux and macOS.
+#
+# A path that no longer exists cannot be resolved, so it is compared as
+# written; listing both spellings of each macOS directory, which sits
+# behind a symlink into /private, covers either form.
+in_temporary_dir() {
+    _it_dir=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || _it_dir=$1
+
+    for _it_root in /tmp /private/tmp /var/folders /private/var/folders /dev/shm; do
+        path_within "$_it_dir" "$_it_root" && return 0
+    done
+
+    # $TMPDIR is only a hint. Set at or above HOME, it would claim every
+    # clone on the machine, so it counts only when HOME lies outside it.
+    [ -n "${TMPDIR:-}" ] || return 1
+    _it_tmp=$(CDPATH='' cd -- "$TMPDIR" 2>/dev/null && pwd -P) || return 1
+    _it_home=$(CDPATH='' cd -- "$HOME" 2>/dev/null && pwd -P) || _it_home=$HOME
+    path_within "$_it_home" "$_it_tmp" && return 1
+    path_within "$_it_dir" "$_it_tmp"
+}
+
 # Run a command for each entry of a PATH-style list, in order.
 for_each_root() {
     _fer_cmd=$1
@@ -657,6 +691,18 @@ fi
 case "$REPO_DIR" in
     *"$newline"*) die "the path to this clone contains a newline: $REPO_DIR" ;;
 esac
+
+# The block records this clone's path, so a clone the system later tidies
+# away takes the tools with it -- and the block skips a missing loader.sh
+# silently. Nothing else will point that out, so say it now, ahead of
+# the prompt, where a Ctrl-C still costs nothing.
+if in_temporary_dir "$REPO_DIR"; then
+    warn "$PROG: warning: this clone is in a temporary directory:"
+    warn "$PROG: warning:   $REPO_DIR"
+    warn "$PROG: warning: the system deletes files there, at the latest on a"
+    warn "$PROG: warning: reboot, and new shells then load no tools. Clone the"
+    warn "$PROG: warning: repository somewhere permanent and install from there."
+fi
 
 # The clone root. Its default is the directory this clone sits in, which
 # is almost always the answer: people keep their clones side by side.

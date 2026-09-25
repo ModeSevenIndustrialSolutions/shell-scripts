@@ -721,6 +721,58 @@ else
     pass 'install: refuses an explicitly empty clone directory'
 fi
 
+# --- a clone in a temporary directory --------------------------------------
+
+# The system empties these by itself, whatever TMPDIR says. The sandbox
+# normally lives in one of them, which is what lets a copy of the clone
+# stand in for one somebody made under /tmp.
+under_fixed_temp() {
+    _uft=$(CDPATH='' cd -- "$1" && pwd -P)
+    case "$_uft/" in
+        /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*|/dev/shm/*)
+            return 0 ;;
+    esac
+    return 1
+}
+
+# The block records the clone's path, so a clone that vanishes takes the
+# tools with it, silently. Installing from one has to say so.
+temp_clone="$SANDBOX/temp-clone"
+mkdir -p "$temp_clone"
+cp -pR "$REPO_DIR/install.sh" "$REPO_DIR/loader.sh" "$REPO_DIR/tools" \
+    "$temp_clone/"
+if under_fixed_temp "$temp_clone"; then
+    temp_home=$(new_home temp)
+    if HOME="$temp_home" "$temp_clone/install.sh" --yes --fork-path "$forks" \
+        >/dev/null 2>"$SANDBOX/temp-clone.err" &&
+        grep -q 'temporary directory' "$SANDBOX/temp-clone.err"; then
+        pass 'install: warns about a clone in a temporary directory'
+    else
+        fail 'install: warns about a clone in a temporary directory' \
+            "$(cat "$SANDBOX/temp-clone.err")"
+    fi
+else
+    skip 'install: warns about a clone in a temporary directory' \
+        'the sandbox is not under a system temporary directory'
+fi
+
+# ...and only then. The clone under test is the control, unless it too
+# sits somewhere temporary.
+if under_fixed_temp "$REPO_DIR"; then
+    skip 'install: no temporary-directory warning for a lasting clone' \
+        'this clone is itself in a temporary directory'
+else
+    lasting_home=$(new_home lasting)
+    install_into "$lasting_home" "$forks" >/dev/null 2>"$SANDBOX/lasting.err" ||
+        true
+    if grep -q 'temporary directory' "$SANDBOX/lasting.err"; then
+        fail 'install: no temporary-directory warning for a lasting clone' \
+            "$(cat "$SANDBOX/lasting.err")"
+    else
+        pass 'install: no temporary-directory warning for a lasting clone'
+    fi
+fi
+
 # --- the tools survive a caller running under set -u -----------------------
 
 # release() lives in the caller's shell, where a bare $2 would be an

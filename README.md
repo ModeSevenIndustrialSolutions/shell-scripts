@@ -52,6 +52,12 @@ back from `LFRELENG_ACTIONS_FORK_PATH` to find a clone by repository name.
 
 Open a new shell, or run `exec $SHELL -l`, to pick up the tools.
 
+Keep the clone somewhere permanent. The shell loads the tools straight
+out of it, so a clone under `/tmp`, or under macOS's per-user temporary
+directory, goes when the system clears that directory — at the latest on
+the next reboot — and the tools then stop loading without a word. The
+installer warns when run from a clone in one of those places.
+
 Non-interactive installs skip the question:
 
 ```bash
