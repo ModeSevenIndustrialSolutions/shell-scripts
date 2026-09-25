@@ -26,12 +26,15 @@ REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 BEGIN_MARK='# >>> lfreleng-actions/shell-scripts >>>'
 END_MARK='# <<< lfreleng-actions/shell-scripts <<<'
 SANDBOX=''
+# A test home that has to live outside the sandbox; see the TMPDIR tests.
+INNER_HOME=''
 passed=0
 failed=0
 skipped=0
 
 cleanup() {
     [ -n "$SANDBOX" ] && rm -rf "$SANDBOX"
+    [ -n "$INNER_HOME" ] && rm -rf "$INNER_HOME"
     return 0
 }
 
@@ -106,6 +109,25 @@ new_home() {
 
 install_into() {
     HOME=$1 "$REPO_DIR/install.sh" --yes --fork-path "$2"
+}
+
+# A copy of the clone's working parts at $1, to install from somewhere
+# other than the clone under test.
+copy_clone() {
+    mkdir -p "$1"
+    cp -pR "$REPO_DIR/install.sh" "$REPO_DIR/loader.sh" "$REPO_DIR/tools" "$1/"
+}
+
+# The system empties these by itself, whatever TMPDIR says. The sandbox
+# normally lives in one of them, which is what lets a copy of the clone
+# stand in for one somebody made under /tmp.
+under_fixed_temp() {
+    _uft=$(CDPATH='' cd -- "$1" && pwd -P)
+    case "$_uft/" in
+        /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*|/dev/shm/*)
+            return 0 ;;
+    esac
+    return 1
 }
 
 SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/lfreleng-tests.XXXXXX")
@@ -388,6 +410,118 @@ case "$got" in
             "expected '$decode_root' in:
 $got" ;;
 esac
+
+# Where the tools load from, which is the clone the block was written
+# from -- not the one --status happens to be run out of.
+got=$(env -i HOME="$home" PATH="$PATH" "$REPO_DIR/install.sh" --status 2>&1)
+case "$got" in
+    *"loads from:"*"recorded"*"$REPO_DIR"*)
+        pass 'status: reports the clone the block loads from' ;;
+    *)  fail 'status: reports the clone the block loads from' "$got" ;;
+esac
+if under_fixed_temp "$REPO_DIR"; then
+    skip 'status: raises no alarm over a clone in place' \
+        'this clone is itself in a temporary directory'
+else
+    case "$got" in
+        *missing*|*temporary*)
+            fail 'status: raises no alarm over a clone in place' "$got" ;;
+        *)  pass 'status: raises no alarm over a clone in place' ;;
+    esac
+fi
+
+# The block skips a loader.sh it cannot read without a word, so --status
+# is the one place a vanished clone shows. A periodic sweep of a
+# temporary directory leaves the directories and takes the files, which
+# is the shape copied here.
+gone_clone="$SANDBOX/gone-clone"
+gone_home=$(new_home gone)
+copy_clone "$gone_clone"
+HOME="$gone_home" "$gone_clone/install.sh" --yes --fork-path "$forks" \
+    >/dev/null 2>&1
+rm -f "$gone_clone/loader.sh"
+got=$(env -i HOME="$gone_home" PATH="$PATH" "$REPO_DIR/install.sh" --status 2>&1)
+case "$got" in
+    *"recorded"*"$gone_clone"*"missing"*)
+        pass 'status: flags a recorded clone whose loader.sh has gone' ;;
+    *)  fail 'status: flags a recorded clone whose loader.sh has gone' "$got" ;;
+esac
+if under_fixed_temp "$gone_clone"; then
+    case "$got" in
+        *temporary*)
+            pass 'status: flags a recorded clone in a temporary directory' ;;
+        *)  fail 'status: flags a recorded clone in a temporary directory' \
+                "$got" ;;
+    esac
+else
+    skip 'status: flags a recorded clone in a temporary directory' \
+        'the sandbox is not under a system temporary directory'
+fi
+
+# LFRELENG_SHELL_SCRIPTS is one pathname, not a PATH-style list, so a
+# colon in it -- even a doubled one -- has to survive the round trip.
+colon_clone="$SANDBOX/colon::clone"
+colon_home=$(new_home colon)
+copy_clone "$colon_clone"
+HOME="$colon_home" "$colon_clone/install.sh" --yes --fork-path "$forks" \
+    >/dev/null 2>&1
+got=$(env -i HOME="$colon_home" PATH="$PATH" "$REPO_DIR/install.sh" --status 2>&1)
+case "$got" in
+    *missing*) fail 'status: reads a recorded clone path holding colons' "$got" ;;
+    *"recorded    $colon_clone"*)
+        pass 'status: reads a recorded clone path holding colons' ;;
+    *)  fail 'status: reads a recorded clone path holding colons' "$got" ;;
+esac
+
+# $TMPDIR counts as temporary only while HOME lies outside it. Proving
+# either half needs a writable directory the fixed list does not already
+# cover, which the sandbox normally is not. This clone's .git stands in:
+# git ignores what it does not know there, and all it gains is the
+# installer's own short-lived scratch files and, briefly, one home. The
+# recorded clone need not exist, so the block names one that does not.
+scratch="$REPO_DIR/.git"
+scratch_ok=0
+if [ -d "$scratch" ] && [ -w "$scratch" ] && ! under_fixed_temp "$scratch"; then
+    scratch=$(CDPATH='' cd -- "$scratch" && pwd -P)
+    # The block below is written by hand, unescaped.
+    case "$scratch" in
+        *[\\\"\$\`]*) ;;
+        *) scratch_ok=1 ;;
+    esac
+fi
+if [ "$scratch_ok" -eq 1 ]; then
+    tmpdir_block() {
+        printf '%s\nLFRELENG_ACTIONS_FORK_PATH="%s"\nLFRELENG_SHELL_SCRIPTS="%s"\n%s\n' \
+            "$BEGIN_MARK" "$forks" "$scratch/lfreleng-no-such-clone" \
+            "$END_MARK" >"$1/.zshrc"
+    }
+
+    tmpdir_home=$(new_home tmpdir)
+    tmpdir_block "$tmpdir_home"
+    got=$(env -i HOME="$tmpdir_home" PATH="$PATH" TMPDIR="$scratch" \
+        "$REPO_DIR/install.sh" --status 2>&1)
+    case "$got" in
+        *temporary*) pass 'status: honours a TMPDIR that HOME lies outside' ;;
+        *) fail 'status: honours a TMPDIR that HOME lies outside' "$got" ;;
+    esac
+
+    INNER_HOME="$scratch/lfreleng-test-home.$$"
+    mkdir -p "$INNER_HOME"
+    tmpdir_block "$INNER_HOME"
+    got=$(env -i HOME="$INNER_HOME" PATH="$PATH" TMPDIR="$scratch" \
+        "$REPO_DIR/install.sh" --status 2>&1)
+    rm -rf "$INNER_HOME"
+    INNER_HOME=''
+    case "$got" in
+        *temporary*) fail 'status: ignores a TMPDIR that holds HOME' "$got" ;;
+        *) pass 'status: ignores a TMPDIR that holds HOME' ;;
+    esac
+else
+    skip 'status: honours a TMPDIR that HOME lies outside' \
+        "no writable .git outside a temporary directory"
+    skip 'status: ignores a TMPDIR that holds HOME' \
+        "no writable .git outside a temporary directory"
+fi
 
 # --- dry run ---------------------------------------------------------------
 
@@ -719,6 +853,44 @@ elif grep -qxF "$BEGIN_MARK" "$empty_home/.zshrc"; then
         'it installed anyway'
 else
     pass 'install: refuses an explicitly empty clone directory'
+fi
+
+# --- a clone in a temporary directory --------------------------------------
+
+# The block records the clone's path, so a clone that vanishes takes the
+# tools with it, silently. Installing from one has to say so.
+temp_clone="$SANDBOX/temp-clone"
+copy_clone "$temp_clone"
+if under_fixed_temp "$temp_clone"; then
+    temp_home=$(new_home temp)
+    if HOME="$temp_home" "$temp_clone/install.sh" --yes --fork-path "$forks" \
+        >/dev/null 2>"$SANDBOX/temp-clone.err" &&
+        grep -q 'temporary directory' "$SANDBOX/temp-clone.err"; then
+        pass 'install: warns about a clone in a temporary directory'
+    else
+        fail 'install: warns about a clone in a temporary directory' \
+            "$(cat "$SANDBOX/temp-clone.err")"
+    fi
+else
+    skip 'install: warns about a clone in a temporary directory' \
+        'the sandbox is not under a system temporary directory'
+fi
+
+# ...and only then. The clone under test is the control, unless it too
+# sits somewhere temporary.
+if under_fixed_temp "$REPO_DIR"; then
+    skip 'install: no temporary-directory warning for a lasting clone' \
+        'this clone is itself in a temporary directory'
+else
+    lasting_home=$(new_home lasting)
+    install_into "$lasting_home" "$forks" >/dev/null 2>"$SANDBOX/lasting.err" ||
+        true
+    if grep -q 'temporary directory' "$SANDBOX/lasting.err"; then
+        fail 'install: no temporary-directory warning for a lasting clone' \
+            "$(cat "$SANDBOX/lasting.err")"
+    else
+        pass 'install: no temporary-directory warning for a lasting clone'
+    fi
 fi
 
 # --- the tools survive a caller running under set -u -----------------------

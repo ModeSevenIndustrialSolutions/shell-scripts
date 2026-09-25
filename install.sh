@@ -193,11 +193,28 @@ portable_path_list() {
     printf '%s\n' "$_ppl_out"
 }
 
-# Undo what portable_path_list did, so --status reports the directory
-# rather than the shell source that names it. The format is this
-# installer's own, so decoding it is a matter of reversing two known
+# Undo what portable_path did to one pathname, so --status reports the
+# directory rather than the shell source that names it. The format is
+# this installer's own, so decoding it is a matter of reversing two known
 # steps -- no eval, which would hand the contents of somebody's start-up
 # file to the shell.
+decode_path() {
+    _dp_path=$1
+
+    # The deliberate $HOME reference, which sits unescaped at the start.
+    # A literal dollar there would read '\$'.
+    # shellcheck disable=SC2016  # matching the text '$HOME', not its value
+    case "$_dp_path" in
+        '$HOME')   _dp_path=$HOME ;;
+        '$HOME/'*) _dp_path="$HOME/${_dp_path#'$HOME/'}" ;;
+    esac
+
+    # Then escape_literal's backslashes, which only ever precede one of
+    # \ " $ or a backtick.
+    printf '%s\n' "$(printf '%s' "$_dp_path" | sed -e 's/\\\(.\)/\1/g')"
+}
+
+# The same for a value portable_path_list encoded, one entry at a time.
 decode_recorded() {
     _dr_rest=$1
     _dr_out=''
@@ -209,17 +226,7 @@ decode_recorded() {
         esac
         [ -n "$_dr_one" ] || continue
 
-        # The deliberate $HOME reference, which sits unescaped at the
-        # start of an entry. A literal dollar there would read '\$'.
-        # shellcheck disable=SC2016  # matching the text '$HOME', not its value
-        case "$_dr_one" in
-            '$HOME')   _dr_one=$HOME ;;
-            '$HOME/'*) _dr_one="$HOME/${_dr_one#'$HOME/'}" ;;
-        esac
-
-        # Then escape_literal's backslashes, which only ever precede one
-        # of \ " $ or a backtick.
-        _dr_one=$(printf '%s' "$_dr_one" | sed -e 's/\\\(.\)/\1/g')
+        _dr_one=$(decode_path "$_dr_one")
 
         if [ -z "$_dr_out" ]; then
             _dr_out=$_dr_one
@@ -229,6 +236,40 @@ decode_recorded() {
     done
 
     printf '%s\n' "$_dr_out"
+}
+
+# Succeed when path $1 lies at or below directory $2. Both are compared
+# as given, so resolve symlinks first where that matters.
+path_within() {
+    case "${1%/}/" in
+        "${2%/}/"*) return 0 ;;
+    esac
+    return 1
+}
+
+# Succeed when $1 lies in a directory the system empties by itself: /tmp
+# on every reboot, and on macOS the per-user /var/folders tree too, both
+# of which are also swept between reboots. A clone there disappears from
+# under the managed block, which then skips loader.sh without a word.
+# /var/tmp stays off the list: it survives reboots on Linux and macOS.
+#
+# A path that no longer exists cannot be resolved, so it is compared as
+# written; listing both spellings of each macOS directory, which sits
+# behind a symlink into /private, covers either form.
+in_temporary_dir() {
+    _it_dir=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || _it_dir=$1
+
+    for _it_root in /tmp /private/tmp /var/folders /private/var/folders /dev/shm; do
+        path_within "$_it_dir" "$_it_root" && return 0
+    done
+
+    # $TMPDIR is only a hint. Set at or above HOME, it would claim every
+    # clone on the machine, so it counts only when HOME lies outside it.
+    [ -n "${TMPDIR:-}" ] || return 1
+    _it_tmp=$(CDPATH='' cd -- "$TMPDIR" 2>/dev/null && pwd -P) || return 1
+    _it_home=$(CDPATH='' cd -- "$HOME" 2>/dev/null && pwd -P) || _it_home=$HOME
+    path_within "$_it_home" "$_it_tmp" && return 1
+    path_within "$_it_dir" "$_it_tmp"
 }
 
 # Run a command for each entry of a PATH-style list, in order.
@@ -460,22 +501,33 @@ $END_MARK
 EOF
 }
 
-# The value the block records for the clone directory, read back out of
-# the first managed block found. Reported by --status, where the variable
-# this process inherited says only what the shell that launched it knew,
-# which right after an install is the previous answer or none at all.
-recorded_fork_path() {
-    awk -v begin="$BEGIN_MARK" -v end="$END_MARK" '
+# A value the block records, read back out of the first managed block
+# found: LFRELENG_ACTIONS_FORK_PATH or LFRELENG_SHELL_SCRIPTS, named by
+# $1. Reported by --status, where the variable this process inherited
+# says only what the shell that launched it knew, which right after an
+# install is the previous answer or none at all.
+recorded_value() {
+    awk -v begin="$BEGIN_MARK" -v end="$END_MARK" -v prefix="$1=\"" '
         $0 == begin { inside = 1; next }
         $0 == end   { inside = 0; next }
-        inside && $0 ~ /^[[:space:]]*LFRELENG_ACTIONS_FORK_PATH="/ {
+        inside {
             line = $0
-            sub(/^[[:space:]]*LFRELENG_ACTIONS_FORK_PATH="/, "", line)
+            sub(/^[[:space:]]*/, "", line)
+            if (index(line, prefix) != 1) next
+            line = substr(line, length(prefix) + 1)
             sub(/"[[:space:]]*$/, "", line)
             print line
             exit
         }
-    ' "$1" 2>/dev/null
+    ' "$2" 2>/dev/null
+}
+
+# Fill in both recorded values for --status from the block in file $1,
+# unless an earlier block already has: the first one found answers.
+read_recorded() {
+    [ -z "$recorded" ] || return 0
+    recorded=$(recorded_value LFRELENG_ACTIONS_FORK_PATH "$1")
+    recorded_clone=$(recorded_value LFRELENG_SHELL_SCRIPTS "$1")
 }
 
 # Replace a file's contents without replacing the file: many people keep
@@ -557,11 +609,12 @@ if [ "$action" = status ]; then
 
     seen=0
     recorded=''
+    recorded_clone=''
     while IFS= read -r file; do
         seen=1
         if has_block "$file"; then
             report installed "$file"
-            [ -n "$recorded" ] || recorded=$(recorded_fork_path "$file")
+            read_recorded "$file"
         elif [ -f "$file" ]; then
             report absent "$file"
         else
@@ -582,10 +635,34 @@ if [ "$action" = status ]; then
     while IFS= read -r file; do
         if has_block "$file" && ! grep -qxF "$file" "$TARGETS"; then
             report stray "$file"
-            [ -n "$recorded" ] || recorded=$(recorded_fork_path "$file")
+            read_recorded "$file"
         fi
     done <"$STRAYS"
     rm -f "$STRAYS"
+
+    # Where new shells load the tools from. The block skips a loader.sh
+    # it cannot read without a word, so a clone that has gone -- moved,
+    # deleted, or cleared out of a temporary directory -- shows up here
+    # or nowhere.
+    say "loads from:"
+    if [ -n "$recorded_clone" ]; then
+        recorded_clone=$(decode_path "$recorded_clone")
+        report recorded "$recorded_clone"
+        clone_trouble=0
+        if [ ! -r "$recorded_clone/loader.sh" ]; then
+            report missing 'no loader.sh there, so new shells load no tools'
+            clone_trouble=1
+        fi
+        if in_temporary_dir "$recorded_clone"; then
+            report temporary 'the system deletes files there, at the latest on reboot'
+            clone_trouble=1
+        fi
+        if [ "$clone_trouble" -eq 1 ]; then
+            say "  Re-run install.sh from a clone kept somewhere permanent."
+        fi
+    else
+        report recorded '(no managed block found)'
+    fi
 
     say "fork path:"
     if [ -n "$recorded" ]; then
@@ -657,6 +734,18 @@ fi
 case "$REPO_DIR" in
     *"$newline"*) die "the path to this clone contains a newline: $REPO_DIR" ;;
 esac
+
+# The block records this clone's path, so a clone the system later tidies
+# away takes the tools with it -- and the block skips a missing loader.sh
+# silently. Nothing else will point that out, so say it now, ahead of
+# the prompt, where a Ctrl-C still costs nothing.
+if in_temporary_dir "$REPO_DIR"; then
+    warn "$PROG: warning: this clone is in a temporary directory:"
+    warn "$PROG: warning:   $REPO_DIR"
+    warn "$PROG: warning: the system deletes files there, at the latest on a"
+    warn "$PROG: warning: reboot, and new shells then load no tools. Clone the"
+    warn "$PROG: warning: repository somewhere permanent and install from there."
+fi
 
 # The clone root. Its default is the directory this clone sits in, which
 # is almost always the answer: people keep their clones side by side.
