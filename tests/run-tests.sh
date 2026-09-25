@@ -26,12 +26,15 @@ REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 BEGIN_MARK='# >>> lfreleng-actions/shell-scripts >>>'
 END_MARK='# <<< lfreleng-actions/shell-scripts <<<'
 SANDBOX=''
+# A test home that has to live outside the sandbox; see the TMPDIR tests.
+INNER_HOME=''
 passed=0
 failed=0
 skipped=0
 
 cleanup() {
     [ -n "$SANDBOX" ] && rm -rf "$SANDBOX"
+    [ -n "$INNER_HOME" ] && rm -rf "$INNER_HOME"
     return 0
 }
 
@@ -453,6 +456,71 @@ if under_fixed_temp "$gone_clone"; then
 else
     skip 'status: flags a recorded clone in a temporary directory' \
         'the sandbox is not under a system temporary directory'
+fi
+
+# LFRELENG_SHELL_SCRIPTS is one pathname, not a PATH-style list, so a
+# colon in it -- even a doubled one -- has to survive the round trip.
+colon_clone="$SANDBOX/colon::clone"
+colon_home=$(new_home colon)
+copy_clone "$colon_clone"
+HOME="$colon_home" "$colon_clone/install.sh" --yes --fork-path "$forks" \
+    >/dev/null 2>&1
+got=$(env -i HOME="$colon_home" PATH="$PATH" "$REPO_DIR/install.sh" --status 2>&1)
+case "$got" in
+    *missing*) fail 'status: reads a recorded clone path holding colons' "$got" ;;
+    *"recorded    $colon_clone"*)
+        pass 'status: reads a recorded clone path holding colons' ;;
+    *)  fail 'status: reads a recorded clone path holding colons' "$got" ;;
+esac
+
+# $TMPDIR counts as temporary only while HOME lies outside it. Proving
+# either half needs a writable directory the fixed list does not already
+# cover, which the sandbox normally is not. This clone's .git stands in:
+# git ignores what it does not know there, and all it gains is the
+# installer's own short-lived scratch files and, briefly, one home. The
+# recorded clone need not exist, so the block names one that does not.
+scratch="$REPO_DIR/.git"
+scratch_ok=0
+if [ -d "$scratch" ] && [ -w "$scratch" ] && ! under_fixed_temp "$scratch"; then
+    scratch=$(CDPATH='' cd -- "$scratch" && pwd -P)
+    # The block below is written by hand, unescaped.
+    case "$scratch" in
+        *[\\\"\$\`]*) ;;
+        *) scratch_ok=1 ;;
+    esac
+fi
+if [ "$scratch_ok" -eq 1 ]; then
+    tmpdir_block() {
+        printf '%s\nLFRELENG_ACTIONS_FORK_PATH="%s"\nLFRELENG_SHELL_SCRIPTS="%s"\n%s\n' \
+            "$BEGIN_MARK" "$forks" "$scratch/lfreleng-no-such-clone" \
+            "$END_MARK" >"$1/.zshrc"
+    }
+
+    tmpdir_home=$(new_home tmpdir)
+    tmpdir_block "$tmpdir_home"
+    got=$(env -i HOME="$tmpdir_home" PATH="$PATH" TMPDIR="$scratch" \
+        "$REPO_DIR/install.sh" --status 2>&1)
+    case "$got" in
+        *temporary*) pass 'status: honours a TMPDIR that HOME lies outside' ;;
+        *) fail 'status: honours a TMPDIR that HOME lies outside' "$got" ;;
+    esac
+
+    INNER_HOME="$scratch/lfreleng-test-home.$$"
+    mkdir -p "$INNER_HOME"
+    tmpdir_block "$INNER_HOME"
+    got=$(env -i HOME="$INNER_HOME" PATH="$PATH" TMPDIR="$scratch" \
+        "$REPO_DIR/install.sh" --status 2>&1)
+    rm -rf "$INNER_HOME"
+    INNER_HOME=''
+    case "$got" in
+        *temporary*) fail 'status: ignores a TMPDIR that holds HOME' "$got" ;;
+        *) pass 'status: ignores a TMPDIR that holds HOME' ;;
+    esac
+else
+    skip 'status: honours a TMPDIR that HOME lies outside' \
+        "no writable .git outside a temporary directory"
+    skip 'status: ignores a TMPDIR that holds HOME' \
+        "no writable .git outside a temporary directory"
 fi
 
 # --- dry run ---------------------------------------------------------------

@@ -193,11 +193,28 @@ portable_path_list() {
     printf '%s\n' "$_ppl_out"
 }
 
-# Undo what portable_path_list did, so --status reports the directory
-# rather than the shell source that names it. The format is this
-# installer's own, so decoding it is a matter of reversing two known
+# Undo what portable_path did to one pathname, so --status reports the
+# directory rather than the shell source that names it. The format is
+# this installer's own, so decoding it is a matter of reversing two known
 # steps -- no eval, which would hand the contents of somebody's start-up
 # file to the shell.
+decode_path() {
+    _dp_path=$1
+
+    # The deliberate $HOME reference, which sits unescaped at the start.
+    # A literal dollar there would read '\$'.
+    # shellcheck disable=SC2016  # matching the text '$HOME', not its value
+    case "$_dp_path" in
+        '$HOME')   _dp_path=$HOME ;;
+        '$HOME/'*) _dp_path="$HOME/${_dp_path#'$HOME/'}" ;;
+    esac
+
+    # Then escape_literal's backslashes, which only ever precede one of
+    # \ " $ or a backtick.
+    printf '%s\n' "$(printf '%s' "$_dp_path" | sed -e 's/\\\(.\)/\1/g')"
+}
+
+# The same for a value portable_path_list encoded, one entry at a time.
 decode_recorded() {
     _dr_rest=$1
     _dr_out=''
@@ -209,17 +226,7 @@ decode_recorded() {
         esac
         [ -n "$_dr_one" ] || continue
 
-        # The deliberate $HOME reference, which sits unescaped at the
-        # start of an entry. A literal dollar there would read '\$'.
-        # shellcheck disable=SC2016  # matching the text '$HOME', not its value
-        case "$_dr_one" in
-            '$HOME')   _dr_one=$HOME ;;
-            '$HOME/'*) _dr_one="$HOME/${_dr_one#'$HOME/'}" ;;
-        esac
-
-        # Then escape_literal's backslashes, which only ever precede one
-        # of \ " $ or a backtick.
-        _dr_one=$(printf '%s' "$_dr_one" | sed -e 's/\\\(.\)/\1/g')
+        _dr_one=$(decode_path "$_dr_one")
 
         if [ -z "$_dr_out" ]; then
             _dr_out=$_dr_one
@@ -639,7 +646,7 @@ if [ "$action" = status ]; then
     # or nowhere.
     say "loads from:"
     if [ -n "$recorded_clone" ]; then
-        recorded_clone=$(decode_recorded "$recorded_clone")
+        recorded_clone=$(decode_path "$recorded_clone")
         report recorded "$recorded_clone"
         clone_trouble=0
         if [ ! -r "$recorded_clone/loader.sh" ]; then
